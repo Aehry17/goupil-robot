@@ -1,0 +1,50 @@
+name: Goupil
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: goupil
+  cancel-in-progress: false
+
+jobs:
+  rappels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TZ: Europe/Paris
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+      VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+      VAPID_CONTACT: ${{ secrets.VAPID_CONTACT }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Installer les outils
+        run: npm install --no-audit --no-fund
+
+      - name: Envoyer les rappels
+        run: node goupil.mjs
+
+      # GitHub met en pause les robots des projets inactifs depuis 60 jours.
+      # Une fois par mois, Goupil laisse donc une petite trace pour rester éveillé.
+      - name: Garder Goupil éveillé
+        run: |
+          derniere=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - derniere )) -gt 2592000 ]; then
+            date > reveil.txt
+            git config user.name "Goupil"
+            git config user.email "goupil@users.noreply.github.com"
+            git add reveil.txt
+            git commit -m "Goupil reste éveillé 🦊"
+            git push
+          fi
