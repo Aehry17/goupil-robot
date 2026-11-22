@@ -65,14 +65,16 @@ function phraseGoupil(n) {
 }
 
 const maintenant = Date.now();
-const [notesSnap, abosSnap, profilsSnap, etatSnap] = await Promise.all([
+const [notesSnap, coursesSnap, abosSnap, profilsSnap, etatSnap] = await Promise.all([
   db.collection("notes").get(),
+  db.collection("courses").get(),
   db.collection("abonnements").get(),
   db.collection("profils").get(),
   db.doc("robot/etat").get(),
 ]);
 
 const notes = notesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+const courses = coursesSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 const abonnements = abosSnap.docs.map((d) => ({ id: d.id, ref: d.ref, ...d.data() }));
 const prenoms = {};
 profilsSnap.forEach((d) => { prenoms[d.id] = d.data().prenom; });
@@ -80,6 +82,41 @@ const etat = etatSnap.exists ? etatSnap.data() : {};
 const dernierPassage = etat.dernierPassage || maintenant - 10 * 60000;
 const envoyes = etat.envoyes || {};
 let compteur = 0;
+
+// Envoie un message à une liste d'appareils (iPhone/navigateur ou Android)
+async function envoyerA(liste, message) {
+  for (const abo of liste.filter((a) => a.type !== "expo")) await envoyer(abo, message);
+  await envoyerExpo(liste.filter((a) => a.type === "expo" && !a.mort), message);
+}
+
+// Android : on passe par le service de notifications d'Expo
+async function envoyerExpo(liste, message) {
+  if (!liste.length) return;
+  try {
+    const rep = await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(liste.map((a) => ({
+        to: a.token, title: message.title, body: message.body,
+        sound: "default", channelId: "rappels", priority: "high",
+      }))),
+    });
+    const json = await rep.json();
+    (json.data || []).forEach((r, i) => {
+      if (r.status === "ok") compteur++;
+      else {
+        console.log("Échec d’envoi Android", r.message, JSON.stringify(r.details || {}));
+        if (r.details?.error === "DeviceNotRegistered") {
+          liste[i].mort = true;
+          liste[i].ref.delete().catch(() => {});
+        }
+      }
+    });
+    if (json.errors) console.log("Erreur Expo", JSON.stringify(json.errors));
+  } catch (e) {
+    console.log("Échec d’envoi Android", e.message);
+  }
+}
 
 async function envoyer(abo, message) {
   if (abo.mort) return;
@@ -97,6 +134,10 @@ async function envoyer(abo, message) {
   }
 }
 
+// Les appareils web (iPhone) reçoivent les rappels. Les téléphones Android
+// programment déjà leurs rappels eux-mêmes : on ne les prévient que des nouveautés.
+const abonnementsWeb = abonnements.filter((a) => a.type !== "expo");
+
 // 1. Les rappels dont l'heure est arrivée (jusqu'à 2 h de retard maximum)
 for (const n of notes) {
   if (n.fait) continue;
@@ -106,7 +147,7 @@ for (const n of notes) {
   if (envoyes[cle]) continue;
   if (r.getTime() <= maintenant && r.getTime() > maintenant - 2 * 3600000) {
     const message = { title: `🦊 Goupil · ${CATS[n.type]?.label ?? "Rappel"}`, body: phraseGoupil(n), tag: cle };
-    for (const abo of abonnements) await envoyer(abo, message);
+    for (const abo of abonnementsWeb) await envoyer(abo, message);
     envoyes[cle] = maintenant;
   }
 }
@@ -121,13 +162,28 @@ for (const n of notes) {
     body: n.titre + (n.date ? ` · ${quand(n)}` : ""),
     tag: cle,
   };
-  for (const abo of abonnements.filter((a) => a.uid !== n.par)) await envoyer(abo, message);
+  await envoyerA(abonnements.filter((a) => a.uid !== n.par), message);
   envoyes[cle] = maintenant;
+}
+
+// 2 bis. Les nouveaux articles de courses : un seul message par personne
+const nouveauxArticles = courses.filter((c) =>
+  c.creeLe && !c.coche && !envoyes["course-" + c.id] && c.creeLe > dernierPassage - 5 * 60000);
+const parAuteur = {};
+for (const c of nouveauxArticles) (parAuteur[c.par] ||= []).push(c);
+for (const [uid, liste] of Object.entries(parAuteur)) {
+  const auteur = prenoms[uid] || "Ta moitié";
+  const noms = liste.sort((a, b) => a.creeLe - b.creeLe).map((c) => c.nom);
+  const corps = noms.length === 1
+    ? `${auteur} a ajouté « ${noms[0]} » à la liste`
+    : `${auteur} a ajouté ${noms.length} articles : ${noms.slice(0, 4).join(", ")}${noms.length > 4 ? "…" : ""}`;
+  await envoyerA(abonnements.filter((a) => a.uid !== uid), { title: "🛒 Les courses", body: corps, tag: "courses" });
+  for (const c of liste) envoyes["course-" + c.id] = maintenant;
 }
 
 // 3. Les tests demandés depuis l'app
 for (const abo of abonnements.filter((a) => a.testDemande)) {
-  await envoyer(abo, { title: "🦊 Goupil · Test", body: "Coucou ! Si tu me vois, les notifications marchent 💕", tag: "test" });
+  await envoyerA([abo], { title: "🦊 Goupil · Test", body: "Coucou ! Si tu me vois, les notifications marchent 💕", tag: "test" });
   if (!abo.mort) await abo.ref.update({ testDemande: false }).catch(() => {});
 }
 
