@@ -41,19 +41,16 @@ export function quiEst(texte, personnes) {
   return null;
 }
 
-// Regroupe les pages consécutives d'une même personne
+// Regroupe les pages consécutives d'une même personne.
+// Une page sans prénom reconnu (conditions de vente…) suit la page d'avant.
+// Mais des pages sans prénom en tête de fichier restent « à trier » :
+// on ne les donne jamais d'office à quelqu'un d'autre.
 export function groupesDePages(proprietaires) {
-  const rempli = [...proprietaires];
-  let dernier = rempli.find((p) => p) ?? null;
-  for (let i = 0; i < rempli.length; i++) {
-    if (rempli[i]) dernier = rempli[i];
-    else rempli[i] = dernier;
-  }
   const groupes = [];
-  rempli.forEach((p, i) => {
+  proprietaires.forEach((p, i) => {
     const g = groupes[groupes.length - 1];
-    if (g && g.proprietaire === p) g.pages.push(i);
-    else groupes.push({ proprietaire: p, pages: [i] });
+    if (g && (g.proprietaire === p || !p)) g.pages.push(i);
+    else groupes.push({ proprietaire: p || null, pages: [i] });
   });
   return groupes;
 }
