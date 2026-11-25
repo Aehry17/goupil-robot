@@ -1,11 +1,15 @@
 {
   "name": "goupil-robot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Le robot de Goupil : envoie les rappels de You&Me sur l'iPhone",
+  "description": "Le robot de Goupil : rappels, notifications et billets reçus par e-mail",
   "dependencies": {
     "firebase-admin": "^13.0.0",
+    "imapflow": "^2.12.0",
+    "mailparser": "^3.15.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.5.0",
     "web-push": "^3.6.7"
   }
 }

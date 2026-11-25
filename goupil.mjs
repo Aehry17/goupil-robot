@@ -3,6 +3,7 @@
 // dans Firebase et envoie les notifications web qui doivent partir.
 import admin from "firebase-admin";
 import webpush from "web-push";
+import { importerBillets } from "./billets.mjs";
 
 const compte = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({ credential: admin.credential.cert(compte) });
@@ -132,6 +133,23 @@ async function envoyer(abo, message) {
       console.log("Échec d’envoi", e.statusCode, e.body || e.message);
     }
   }
+}
+
+// 0. Le facteur : les billets reçus par e-mail
+try {
+  const ranges = await importerBillets({ db, prenoms, notes, envoyes, maintenant });
+  if (ranges.length) {
+    const titres = [...new Set(ranges.map((b) => b.titre))];
+    const aTrier = ranges.filter((b) => b.aVerifier).length;
+    await envoyerA(abonnements, {
+      title: `🎟 Goupil a rangé ${ranges.length} billet${ranges.length > 1 ? "s" : ""}`,
+      body: titres.slice(0, 3).join(", ") + (aTrier ? ` · ${aTrier} à compléter dans l’app` : ""),
+      tag: "billets",
+    });
+  }
+  console.log(`🎟 ${ranges.length} billet(s) rangé(s) depuis la boîte mail.`);
+} catch (e) {
+  console.log("Boîte mail inaccessible :", e.message);
 }
 
 // Les appareils web (iPhone) reçoivent les rappels. Les téléphones Android
