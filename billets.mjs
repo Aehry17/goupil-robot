@@ -162,8 +162,10 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
   const pieces = (mail.attachments || []).filter((a) =>
     (a.contentType === "application/pdf" || /^image\/(png|jpe?g)$/.test(a.contentType) || /\.pdf$/i.test(a.filename || ""))
     && a.size <= TAILLE_MAX);
+  console.log(`   ✉️  « ${mail.subject || "(sans objet)"} » de ${mail.from?.text || "?"}`);
+  console.log(`      Pièces jointes : ${(mail.attachments || []).map((a) => `${a.filename || "?"} (${a.contentType}, ${Math.round(a.size / 1024)} Ko)`).join(", ") || "aucune"}`);
   if (!pieces.length) {
-    console.log("E-mail sans billet en pièce jointe :", mail.subject);
+    console.log("      → Ignoré : aucun PDF ni image de moins de 10 Mo en pièce jointe.");
     return [];
   }
 
@@ -180,6 +182,7 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
   const type = devinerType(toutLeTexte + " " + (mail.from?.text || ""));
   const quandC = devinerDate(textes.join("\n") + "\n" + (mail.text || "") + "\n" + (mail.subject || ""));
   const infos = { type, titre: devinerTitre(mail.subject, type), date: quandC?.date || "", heure: quandC?.heure || "" };
+  console.log(`      Devinés : type ${infos.type}, titre « ${infos.titre} », date ${infos.date || "?"} ${infos.heure || ""}`);
   const noteId = await noteDuJour(db, notes, infos, envoyes, maintenant);
 
   const ranges = [];
@@ -206,6 +209,7 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
         }
       }
     }
+    if (estPdf) console.log(`      ${nom} : ${pages.length} page(s) lue(s), propriétaires ${JSON.stringify(parts.map((x) => x.proprietaire || "à trier"))}`);
     for (const part of parts) {
       const fichier = await enregistrerFichier(db, part.buffer, nom, mime);
       const billet = {
@@ -223,13 +227,23 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
 
 // ───────────── Le passage du facteur ─────────────
 export async function importerBillets({ db, prenoms, notes, envoyes, maintenant }) {
-  const adresse = process.env.GMAIL_ADRESSE;
+  const adresse = (process.env.GMAIL_ADRESSE || "").trim();
   const motDePasse = (process.env.GMAIL_MOT_DE_PASSE_APPLI || "").replace(/\s/g, "");
-  if (!adresse || !motDePasse) return [];
+  if (!adresse || !motDePasse) {
+    console.log(`🎟 Facteur en pause : secret GMAIL_ADRESSE ${adresse ? "présent" : "ABSENT"}, secret GMAIL_MOT_DE_PASSE_APPLI ${motDePasse ? "présent" : "ABSENT"}.`);
+    return [];
+  }
+  if (motDePasse.length !== 16) console.log(`⚠️ Le mot de passe d’application fait ${motDePasse.length} caractères au lieu de 16.`);
 
   const personnes = Object.entries(prenoms)
     .filter(([, prenom]) => prenom && prenom.length >= 2)
-    .map(([uid, prenom]) => ({ uid, motif: new RegExp(`\\b${norm(prenom).replace(/[^A-Z0-9 -]/g, "")}\\b`) }));
+    .map(([uid, prenom]) => ({ uid, prenom, motif: new RegExp(`\\b${norm(prenom).replace(/[^A-Z0-9 -]/g, "")}\\b`) }));
+  console.log(`🎟 Prénoms recherchés dans les billets : ${personnes.map((p) => p.prenom).join(", ") || "aucun"}`);
+
+  // Les e-mails déjà traités (on regarde les 3 derniers jours, lus ou non)
+  const etatRef = db.doc("robot/courrier");
+  const etatSnap = await etatRef.get();
+  const deja = (etatSnap.exists && etatSnap.data().ids) || {};
 
   const client = new ImapFlow({
     host: "imap.gmail.com", port: 993, secure: true, logger: false,
@@ -237,22 +251,39 @@ export async function importerBillets({ db, prenoms, notes, envoyes, maintenant 
   });
   const ranges = [];
   await client.connect();
+  console.log(`📬 Connecté à la boîte ${adresse}.`);
+  try {
+    const dossiers = await client.list();
+    const spams = dossiers.find((d) => d.specialUse === "\\Junk");
+    if (spams) {
+      const st = await client.status(spams.path, { messages: true });
+      if (st.messages) console.log(`⚠️ ${st.messages} e-mail(s) dans les spams de Goupil : un billet s’y cache peut-être.`);
+    }
+  } catch {}
+
   const verrou = await client.getMailboxLock("INBOX");
   try {
-    const nouveaux = (await client.search({ seen: false }, { uid: true })) || [];
-    for (const uid of nouveaux.slice(0, 10)) {
+    const depuis = new Date(maintenant - 3 * 86400000);
+    const recents = (await client.search({ since: depuis }, { uid: true })) || [];
+    console.log(`📬 Boîte de réception : ${client.mailbox?.exists ?? "?"} e-mail(s) en tout, ${recents.length} reçu(s) ces 3 derniers jours.`);
+    for (const uid of recents.slice(-15)) {
       try {
-        const message = await client.fetchOne(uid, { source: true }, { uid: true });
+        const message = await client.fetchOne(uid, { envelope: true, source: true }, { uid: true });
+        const id = message.envelope?.messageId || `uid-${uid}`;
+        if (deja[id]) continue;
         const mail = await simpleParser(message.source);
         ranges.push(...(await traiterMail(mail, { db, personnes, notes, envoyes, maintenant })));
+        deja[id] = maintenant;
+        await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
       } catch (e) {
-        console.log("E-mail non traité :", e.message);
+        console.log("   E-mail non traité :", e.message);
       }
-      await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
     }
   } finally {
     verrou.release();
     await client.logout();
   }
+  for (const k of Object.keys(deja)) if (maintenant - deja[k] > 10 * 86400000) delete deja[k];
+  await etatRef.set({ ids: deja });
   return ranges;
 }
