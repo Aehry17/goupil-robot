@@ -15,13 +15,15 @@ concurrency:
 jobs:
   rappels:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     env:
       TZ: Europe/Paris
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
       VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
       VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
       VAPID_CONTACT: ${{ secrets.VAPID_CONTACT }}
+      GMAIL_ADRESSE: ${{ secrets.GMAIL_ADRESSE }}
+      GMAIL_MOT_DE_PASSE_APPLI: ${{ secrets.GMAIL_MOT_DE_PASSE_APPLI }}
     steps:
       - uses: actions/checkout@v5
 
