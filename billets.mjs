@@ -59,13 +59,20 @@ export function groupesDePages(proprietaires) {
 const MOIS = {
   JANVIER: 1, JANV: 1, FEVRIER: 2, FEVR: 2, FEV: 2, MARS: 3, AVRIL: 4, AVR: 4, MAI: 5, JUIN: 6,
   JUILLET: 7, JUIL: 7, AOUT: 8, SEPTEMBRE: 9, SEPT: 9, OCTOBRE: 10, OCT: 10, NOVEMBRE: 11, NOV: 11, DECEMBRE: 12, DEC: 12,
+  JANUARY: 1, JAN: 1, FEBRUARY: 2, FEB: 2, MARCH: 3, MAR: 3, APRIL: 4, APR: 4, MAY: 5, JUNE: 6, JUN: 6,
+  JULY: 7, JUL: 7, AUGUST: 8, AUG: 8, SEPTEMBER: 9, SEP: 9, OCTOBER: 10, NOVEMBER: 11, DECEMBER: 12,
 };
 
-export function devinerDate(texte, maintenant = new Date()) {
+// Mots qui annoncent la date de l'achat (à éviter) ou celle de l'événement (à préférer)
+const AVANT_ACHAT = /(ACHAT|ACHETE|COMMANDE|COMMANDEE|EMIS|EMISSION|EDITE|IMPRIME|GENERE|PAIEMENT|PAYE|FACTURE|TRANSACTION|RESERVE LE|EFFECTUEE?|PURCHASE|ORDER|ISSUED)\W*(LE|DU|ON|:)?\W*$/;
+const AVANT_EVENEMENT = /(VISITE|VALABLE|ENTREE|CRENEAU|HORAIRE|SEANCE|DEPART|ALLER|RETOUR|REPRESENTATION|EVENEMENT|DATE DE LA|DATE DU|ARRIVEE|CONCERT|SPECTACLE|VISIT|VALID|EVENT|ADMISSION)\W*(DU|DE|LE|ON|:)?\W*(\w+\W+)?$/;
+const MOTIF_HEURE = /\b([01]?\d|2[0-3])\s?(?:H|:)\s?([0-5]\d)?\b/;
+
+export function devinerDate(texte, maintenant = new Date(), dateMail = null) {
   const t = norm(texte);
   const hier = new Date(maintenant); hier.setHours(0, 0, 0, 0); hier.setDate(hier.getDate() - 1);
   const candidats = [];
-  const ajouter = (j, m, a, index) => {
+  const ajouter = (j, m, a, index, longueur) => {
     if (a > 0 && a < 100) a += 2000;
     if (!a) {
       a = maintenant.getFullYear();
@@ -73,21 +80,43 @@ export function devinerDate(texte, maintenant = new Date()) {
     }
     const d = new Date(a, m - 1, j);
     if (d.getMonth() !== m - 1 || d < hier || a > maintenant.getFullYear() + 2) return;
-    candidats.push({ d, index });
+    candidats.push({ d, index, fin: index + longueur });
   };
-  for (const r of t.matchAll(/\b(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})\b/g)) ajouter(+r[1], +r[2], +r[3], r.index);
-  for (const r of t.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) ajouter(+r[3], +r[2], +r[1], r.index);
-  const noms = Object.keys(MOIS).join("|");
-  for (const r of t.matchAll(new RegExp(`\\b(\\d{1,2})(?:ER)?\\s+(${noms})\\.?(?:\\s+(\\d{4}))?`, "g"))) {
-    ajouter(+r[1], MOIS[r[2]], r[3] ? +r[3] : 0, r.index);
+  for (const r of t.matchAll(/\b(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})\b/g)) ajouter(+r[1], +r[2], +r[3], r.index, r[0].length);
+  for (const r of t.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) ajouter(+r[3], +r[2], +r[1], r.index, r[0].length);
+  const noms = Object.keys(MOIS).sort((x, y) => y.length - x.length).join("|");
+  for (const r of t.matchAll(new RegExp(`\\b(\\d{1,2})(?:ER|ST|ND|RD|TH)?\\s+(${noms})\\.?(?:\\s+(\\d{4}))?`, "g"))) {
+    ajouter(+r[1], MOIS[r[2]], r[3] ? +r[3] : 0, r.index, r[0].length);
   }
   if (!candidats.length) return null;
-  candidats.sort((a, b) => a.d - b.d);
+
+  // On donne une note à chaque date trouvée
+  const jourMail = dateMail ? versCle(new Date(dateMail)) : "";
+  const repetitions = {};
+  for (const c of candidats) repetitions[versCle(c.d)] = (repetitions[versCle(c.d)] || 0) + 1;
+  for (const c of candidats) {
+    const avant = t.slice(Math.max(0, c.index - 50), c.index);
+    const apres = t.slice(c.fin, c.fin + 40);
+    c.note = 0;
+    if (AVANT_ACHAT.test(avant)) c.note -= 10;
+    if (AVANT_EVENEMENT.test(avant)) c.note += 5;
+    if (jourMail && versCle(c.d) === jourMail) c.note -= 4;
+    if (MOTIF_HEURE.test(apres)) c.note += 2;
+    c.note += Math.min(3, repetitions[versCle(c.d)] - 1);
+  }
+  candidats.sort((a, b) => b.note - a.note || a.d - b.d);
   const choisi = candidats[0];
-  // L'heure : on la cherche juste après la date, sinon n'importe où
-  const apres = t.slice(choisi.index, choisi.index + 160);
-  const motifHeure = /\b([01]?\d|2[0-3])\s?(?:H|:)\s?([0-5]\d)?\b/;
-  const h = apres.match(motifHeure) || t.match(motifHeure);
+
+  // L'heure : juste après la date choisie, sinon après un mot comme « créneau » ou « horaire »
+  // (on s'arrête avant une autre date ou une mention d'achat, pour ne pas prendre l'heure de la commande)
+  let apres = t.slice(choisi.fin, choisi.fin + 120);
+  const coupure = apres.search(/ACHAT|COMMANDE|EMIS|PAIEMENT|FACTURE|PURCHASE|ORDER|\b\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}\b/);
+  if (coupure >= 0) apres = apres.slice(0, coupure);
+  let h = apres.match(MOTIF_HEURE);
+  if (!h) {
+    const m = t.match(/(CRENEAU|HORAIRE|HEURE D.ENTREE|ENTREE|SEANCE|DEBUT|OUVERTURE|A PARTIR DE|TIME)\W{0,12}([01]?\d|2[0-3])\s?(?:H|:)\s?([0-5]\d)?\b/);
+    if (m) h = [m[0], m[2], m[3]];
+  }
   const heure = h ? `${pad(+h[1])}:${h[2] || "00"}` : "";
   return { date: versCle(choisi.d), heure };
 }
@@ -116,6 +145,50 @@ export function devinerDetails(texte) {
   const place = (t.match(/\bPLACES?\s*:?\s*(\d{1,4}[A-Z]?)\b/) || [])[1] || "";
   const dossier = (t.match(/\b(?:DOSSIER|REFERENCE(?:\s+DE\s+(?:DOSSIER|RESERVATION))?|PNR)\s*:?\s*([A-Z0-9]{6})\b/) || [])[1] || "";
   return { voiture, place, dossier };
+}
+
+// ───────────── Billets à télécharger depuis un lien de l'e-mail ─────────────
+const domaine = (url) => { try { return new URL(url).hostname; } catch { return "?"; } };
+
+export function liensBillets(html) {
+  const liens = [];
+  for (const r of (html || "").matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const url = r[1].replace(/&amp;/g, "&");
+    const texte = r[2].replace(/<[^>]+>/g, " ");
+    const tout = url + " " + texte;
+    if (!/^https:\/\//i.test(url)) continue;
+    if (/unsubscribe|desinscri|d[ée]sabonn|facebook|instagram|twitter|youtube|linkedin|tiktok|privacy|confidentialit|cgv|conditions/i.test(tout)) continue;
+    if (/billet|ticket|t[ée]l[ée]charg|download|\.pdf|imprimer|print/i.test(tout)) liens.push(url);
+  }
+  return [...new Set(liens)].slice(0, 6);
+}
+
+async function telechargerLien(url) {
+  try {
+    const arret = new AbortController();
+    const minuteur = setTimeout(() => arret.abort(), 15000);
+    const rep = await fetch(url, { redirect: "follow", signal: arret.signal, headers: { "User-Agent": "Mozilla/5.0 (Goupil)" } });
+    clearTimeout(minuteur);
+    const type = rep.headers.get("content-type") || "";
+    if (!rep.ok || +(rep.headers.get("content-length") || 0) > TAILLE_MAX) {
+      console.log(`      Lien ignoré (erreur ${rep.status}) sur ${domaine(url)}`);
+      return null;
+    }
+    const buffer = Buffer.from(await rep.arrayBuffer());
+    if (buffer.length > TAILLE_MAX || buffer.subarray(0, 4).toString() !== "%PDF") {
+      console.log(`      Lien ignoré sur ${domaine(url)} : ce n’est pas un PDF${/html/.test(type) ? " (sans doute une page qui demande de se connecter)" : ""}`);
+      return null;
+    }
+    const entete = (rep.headers.get("content-disposition") || "").match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+    let filename = "billet.pdf";
+    try { filename = decodeURIComponent(entete?.[1] || new URL(rep.url).pathname.split("/").pop() || "billet.pdf"); } catch {}
+    if (!/\.pdf$/i.test(filename)) filename += ".pdf";
+    console.log(`      📥 PDF téléchargé depuis un lien sur ${domaine(url)}`);
+    return { filename, contentType: "application/pdf", size: buffer.length, content: buffer };
+  } catch (e) {
+    console.log(`      Lien inaccessible sur ${domaine(url)} (${e.message})`);
+    return null;
+  }
 }
 
 // ───────────── Rangement dans Firebase ─────────────
@@ -156,13 +229,22 @@ async function noteDuJour(db, notes, infos, envoyes, maintenant) {
 
 // ───────────── Le tri d'un e-mail ─────────────
 export async function traiterMail(mail, { db, personnes, notes, envoyes, maintenant }) {
-  const pieces = (mail.attachments || []).filter((a) =>
+  let pieces = (mail.attachments || []).filter((a) =>
     (a.contentType === "application/pdf" || /^image\/(png|jpe?g)$/.test(a.contentType) || /\.pdf$/i.test(a.filename || ""))
     && a.size <= TAILLE_MAX);
-  console.log(`   ✉️  « ${mail.subject || "(sans objet)"} » de ${mail.from?.text || "?"}`);
-  console.log(`      Pièces jointes : ${(mail.attachments || []).map((a) => `${a.filename || "?"} (${a.contentType}, ${Math.round(a.size / 1024)} Ko)`).join(", ") || "aucune"}`);
+  const expediteur = (mail.from?.value?.[0]?.address || "").split("@")[1] || "?";
+  console.log(`   ✉️  E-mail venant de …@${expediteur}`);
+  console.log(`      Pièces jointes : ${(mail.attachments || []).map((a) => `${a.contentType} (${Math.round(a.size / 1024)} Ko)`).join(", ") || "aucune"}`);
   if (!pieces.length) {
-    console.log("      → Ignoré : aucun PDF ni image de moins de 10 Mo en pièce jointe.");
+    const liens = liensBillets(mail.html);
+    if (liens.length) console.log(`      Pas de billet en pièce jointe : j’essaie ${liens.length} lien(s) de téléchargement…`);
+    for (const url of liens) {
+      const piece = await telechargerLien(url);
+      if (piece) pieces.push(piece);
+    }
+  }
+  if (!pieces.length) {
+    console.log("      → Ignoré : aucun billet trouvé, ni en pièce jointe ni en lien téléchargeable.");
     return [];
   }
 
@@ -177,9 +259,9 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
   }
   const toutLeTexte = [mail.subject || "", mail.text || "", ...textes].join("\n");
   const type = devinerType(toutLeTexte + " " + (mail.from?.text || ""));
-  const quandC = devinerDate(textes.join("\n") + "\n" + (mail.text || "") + "\n" + (mail.subject || ""));
+  const quandC = devinerDate(textes.join("\n") + "\n" + (mail.text || "") + "\n" + (mail.subject || ""), new Date(), mail.date);
   const infos = { type, titre: devinerTitre(mail.subject, type), date: quandC?.date || "", heure: quandC?.heure || "" };
-  console.log(`      Devinés : type ${infos.type}, titre « ${infos.titre} », date ${infos.date || "?"} ${infos.heure || ""}`);
+  console.log(`      Devinés : type ${infos.type}, date ${infos.date || "?"} ${infos.heure || "(heure ?)"}`);
   const noteId = await noteDuJour(db, notes, infos, envoyes, maintenant);
 
   const ranges = [];
@@ -206,7 +288,7 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
         }
       }
     }
-    if (estPdf) console.log(`      ${nom} : ${pages.length} page(s) lue(s), propriétaires ${JSON.stringify(parts.map((x) => x.proprietaire || "à trier"))}`);
+    if (estPdf) console.log(`      PDF : ${pages.length} page(s) lue(s), ${parts.length} billet(s) : ${parts.map((x) => x.proprietaire ? (x.proprietaire === "tous" ? "nous deux" : "attribué") : "à trier").join(", ")}`);
     for (const part of parts) {
       const fichier = await enregistrerFichier(db, part.buffer, nom, mime);
       const billet = {
@@ -235,7 +317,7 @@ export async function importerBillets({ db, prenoms, notes, envoyes, maintenant 
   const personnes = Object.entries(prenoms)
     .filter(([, prenom]) => prenom && prenom.length >= 2)
     .map(([uid, prenom]) => ({ uid, prenom, motif: new RegExp(`\\b${norm(prenom).replace(/[^A-Z0-9 -]/g, "")}\\b`) }));
-  console.log(`🎟 Prénoms recherchés dans les billets : ${personnes.map((p) => p.prenom).join(", ") || "aucun"}`);
+  console.log(`🎟 Prénoms recherchés dans les billets : ${personnes.map((p) => p.prenom.charAt(0) + "…").join(", ") || "aucun"}`);
 
   // Les e-mails déjà traités (on regarde les 3 derniers jours, lus ou non)
   const etatRef = db.doc("robot/courrier");
@@ -248,7 +330,7 @@ export async function importerBillets({ db, prenoms, notes, envoyes, maintenant 
   });
   const ranges = [];
   await client.connect();
-  console.log(`📬 Connecté à la boîte ${adresse}.`);
+  console.log("📬 Connecté à la boîte de Goupil.");
   try {
     const dossiers = await client.list();
     const spams = dossiers.find((d) => d.specialUse === "\\Junk");
