@@ -124,19 +124,68 @@ export function devinerDate(texte, maintenant = new Date(), dateMail = null) {
 const TYPES = [
   ["train", /SNCF|OUIGO|TGV|INOUI|\bTER\b|TRENITALIA|EUROSTAR|LYRIA|BILLET DE TRAIN|\bVOITURE\s*\d/],
   ["avion", /AIR ?FRANCE|EASYJET|RYANAIR|TRANSAVIA|VUELING|CARTE D.EMBARQUEMENT|BOARDING/],
-  ["cine", /CINEMA|\bUGC\b|PATHE|GAUMONT|\bMK2\b|SEANCE/],
+  ["musee", /MUSEE|MUSEUM|EXPOSITION|\bEXPO\b|ORSAY|LOUVRE|POMPIDOU|ORANGERIE|QUAI BRANLY|FONDATION|GALERIE|CHATEAU DE VERSAILLES|GRAND PALAIS/],
+  ["cine", /CINEMA|\bUGC\b|PATHE|GAUMONT|\bMK2\b|SEANCE DE CINE/],
   ["concert", /CONCERT|TICKETMASTER|ZENITH|OLYMPIA|FESTIVAL|LIVE NATION|ARENA|SEE TICKETS|DICE/],
   ["spectacle", /THEATRE|SPECTACLE|OPERA|BALLET|COMEDIE|HUMOUR|STAND.?UP|CIRQUE/],
 ];
-export const devinerType = (texte) => (TYPES.find(([, motif]) => motif.test(norm(texte))) || ["autre"])[0];
+export function devinerType(texte, expediteur = {}) {
+  // L'expéditeur d'abord (le plus fiable), puis le contenu
+  const depuisExpediteur = TYPES.find(([, motif]) => motif.test(norm(`${expediteur.nom || ""} ${expediteur.adresse || ""}`.replace(/[.-]/g, " "))));
+  if (depuisExpediteur) return depuisExpediteur[0];
+  return (TYPES.find(([, motif]) => motif.test(norm(texte))) || ["autre"])[0];
+}
 
-export function devinerTitre(sujet, type) {
+// Lieux connus, reconnus à l'adresse de l'expéditeur
+const LIEUX = {
+  "musee-orsay.fr": "Musée d’Orsay", "louvre.fr": "Musée du Louvre", "centrepompidou.fr": "Centre Pompidou",
+  "musee-orangerie.fr": "Musée de l’Orangerie", "quaibranly.fr": "Musée du quai Branly",
+  "chateauversailles.fr": "Château de Versailles", "fondationlouisvuitton.fr": "Fondation Louis Vuitton",
+  "grandpalais.fr": "Grand Palais", "petitpalais.paris.fr": "Petit Palais", "museeprotestant.org": "Musée protestant",
+};
+
+// L'expéditeur d'origine, même quand l'e-mail a été transféré
+export function expediteurOriginal(mail) {
+  const t = mail.text || "";
+  const m = t.match(/^[\s>*]*(?:De|From|Exp[ée]diteur)\s*:\s*\**\s*"?([^"<\n]*?)"?\s*<([^>\s]+@[^>\s]+)>/mi);
+  if (m) return { nom: m[1].trim(), adresse: m[2].trim().toLowerCase() };
+  const v = mail.from?.value?.[0] || {};
+  return { nom: (v.name || "").trim(), adresse: (v.address || "").toLowerCase() };
+}
+
+function nomDuLieu(exp) {
+  const domaineExp = (exp.adresse || "").split("@")[1] || "";
+  const connu = Object.entries(LIEUX).find(([d]) => domaineExp === d || domaineExp.endsWith("." + d));
+  if (connu) return connu[1];
+  const nom = (exp.nom || "")
+    .replace(/\b(billetterie|ticketing|tickets?|no-?reply|ne pas r[ée]pondre|service clients?|[ée]quipe|team|infos?|contact|newsletter|boutique|shop)\b/gi, "")
+    .replace(/[|:\-–]+/g, " ").replace(/\s{2,}/g, " ").trim();
+  return nom.length >= 3 && !nom.includes("@") ? nom : "";
+}
+
+const GENERIQUE = /^(de\s+)?(l['’]\s*|la\s+|le\s+|votre\s+|vos\s+|ta\s+|ton\s+)?(achat|commande|r[ée]servation|paiement|billets?|e-?billets?|confirmation|re[çc]u|facture|order|purchase|tickets?)\b/i;
+
+export function devinerTitre(sujet, type, exp = {}) {
+  const lieu = nomDuLieu(exp);
+  if (type === "musee" && lieu) return lieu; // pour un musée, son nom suffit
   let t = (sujet || "").replace(/^\s*((TR|FWD?|RE|TRANSF)\s*:\s*)+/i, "");
-  t = t.replace(/\b(confirmation|r[ée]capitulatif)\s+(de\s+)?(votre\s+)?(commande|r[ée]servation|achat|voyage)\s*(n[°o]?\s*\S+)?\s*(:|-)?\s*/i, "");
+  t = t.replace(/\b(confirmation|r[ée]capitulatif)\s+(de\s+|du\s+)?(l['’]\s*|la\s+|le\s+|votre\s+)?(commande|r[ée]servation|achat|paiement|voyage)\s*(n[°o]?\s*\S+)?\s*(:|-)?\s*/i, "");
   t = t.replace(/\b(vos|votre|tes|ton)\s+(e-?)?billets?\s*(electroniques?|électroniques?)?\s*(pour|:|-)?\s*/i, "");
   t = t.replace(/\be-?billets?\s*(:|-)?\s*/i, "").replace(/\s{2,}/g, " ").trim().replace(/^[:\-–\s]+/, "");
+  if (!t || GENERIQUE.test(t)) t = lieu;
   if (t.length > 80) t = t.slice(0, 77) + "…";
-  return t || { train: "Voyage en train", concert: "Concert", spectacle: "Spectacle", cine: "Séance de ciné", avion: "Vol" }[type] || "Billet";
+  return t || { train: "Voyage en train", concert: "Concert", spectacle: "Spectacle", cine: "Séance de ciné", avion: "Vol", musee: "Musée" }[type] || "Billet";
+}
+
+// Billet, facture ou simple document (plan, règlement…) ?
+const MARQUES_BILLET = /E-?BILLET|E-?TICKET|BILLET D.?ENTREE|TICKET D.?ENTREE|A PRESENTER|PRESENTEZ|SCANN|CODE.?BARRES?|BARCODE|\bQR\b|ADMISSION|VALABLE|CONTROLE|CRENEAU|PASSAGER|VOITURE|PLACE\s*:?\s*\d|SEAT|GATE/;
+export function natureDocument(texte, personnes) {
+  const t = norm(texte);
+  if (/FACTURE|INVOICE|RECU DE PAIEMENT|RECEIPT|AVOIR\b/.test(t.slice(0, 500))) return "facture";
+  const indicesFacture = (t.match(/FACTURE|INVOICE|\bTVA\b|\bTTC\b|\bHT\b|SIRET|MONTANT|TOTAL|MOYEN DE PAIEMENT/g) || []).length;
+  const billet = MARQUES_BILLET.test(t) || personnes.some((p) => p.motif.test(t));
+  if (indicesFacture >= 4 && !/E-?BILLET|E-?TICKET|A PRESENTER|SCANN/.test(t)) return "facture";
+  return billet ? "billet" : "document";
 }
 
 export function devinerDetails(texte) {
@@ -229,11 +278,11 @@ async function noteDuJour(db, notes, infos, envoyes, maintenant) {
 
 // ───────────── Le tri d'un e-mail ─────────────
 export async function traiterMail(mail, { db, personnes, notes, envoyes, maintenant }) {
+  const exp = expediteurOriginal(mail);
   let pieces = (mail.attachments || []).filter((a) =>
     (a.contentType === "application/pdf" || /^image\/(png|jpe?g)$/.test(a.contentType) || /\.pdf$/i.test(a.filename || ""))
     && a.size <= TAILLE_MAX);
-  const expediteur = (mail.from?.value?.[0]?.address || "").split("@")[1] || "?";
-  console.log(`   ✉️  E-mail venant de …@${expediteur}`);
+  console.log(`   ✉️  E-mail venant de …@${(exp.adresse || "").split("@")[1] || "?"}`);
   console.log(`      Pièces jointes : ${(mail.attachments || []).map((a) => `${a.contentType} (${Math.round(a.size / 1024)} Ko)`).join(", ") || "aucune"}`);
   if (!pieces.length) {
     const liens = liensBillets(mail.html);
@@ -243,24 +292,28 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
       if (piece) pieces.push(piece);
     }
   }
-  if (!pieces.length) {
-    console.log("      → Ignoré : aucun billet trouvé, ni en pièce jointe ni en lien téléchargeable.");
-    return [];
-  }
 
-  // On lit tout le texte disponible pour deviner les infos
-  const textes = [];
-  const lus = [];
+  // On lit chaque document et on ne garde que les billets (pas les factures ni les plans)
+  let lus = [];
   for (const p of pieces) {
     const estPdf = p.contentType === "application/pdf" || /\.pdf$/i.test(p.filename || "");
     const pages = estPdf ? await pagesTexte(p.content) : [];
-    lus.push({ piece: p, estPdf, pages });
-    textes.push(pages.join("\n"));
+    const nature = estPdf ? natureDocument(pages.join(" "), personnes) : "billet";
+    console.log(`      ${estPdf ? `PDF (${pages.length} page${pages.length > 1 ? "s" : ""})` : "Image"} : ${nature}`);
+    lus.push({ piece: p, estPdf, pages, nature });
   }
+  lus = lus.filter((l) => l.nature !== "facture");
+  if (lus.some((l) => l.nature === "billet")) lus = lus.filter((l) => l.nature === "billet");
+  if (!lus.length) {
+    console.log("      → Ignoré : aucun billet trouvé (seulement des factures ou rien du tout).");
+    return [];
+  }
+
+  const textes = lus.map((l) => l.pages.join("\n"));
   const toutLeTexte = [mail.subject || "", mail.text || "", ...textes].join("\n");
-  const type = devinerType(toutLeTexte + " " + (mail.from?.text || ""));
+  const type = devinerType(toutLeTexte, exp);
   const quandC = devinerDate(textes.join("\n") + "\n" + (mail.text || "") + "\n" + (mail.subject || ""), new Date(), mail.date);
-  const infos = { type, titre: devinerTitre(mail.subject, type), date: quandC?.date || "", heure: quandC?.heure || "" };
+  const infos = { type, titre: devinerTitre(mail.subject, type, exp), date: quandC?.date || "", heure: quandC?.heure || "" };
   console.log(`      Devinés : type ${infos.type}, date ${infos.date || "?"} ${infos.heure || "(heure ?)"}`);
   const noteId = await noteDuJour(db, notes, infos, envoyes, maintenant);
 
@@ -281,20 +334,20 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
               texte: g.pages.map((i) => pages[i]).join(" "),
             });
           } catch (e) {
-            console.log("Découpage impossible, PDF gardé entier :", e.message);
+            console.log("      Découpage impossible, PDF gardé entier :", e.message);
             parts = [{ proprietaire: null, buffer: piece.content, texte: pages.join(" ") }];
             break;
           }
         }
       }
     }
-    if (estPdf) console.log(`      PDF : ${pages.length} page(s) lue(s), ${parts.length} billet(s) : ${parts.map((x) => x.proprietaire ? (x.proprietaire === "tous" ? "nous deux" : "attribué") : "à trier").join(", ")}`);
+    console.log(`      → ${parts.length} billet(s) : ${parts.map((x) => x.proprietaire ? (x.proprietaire === "tous" ? "nous deux" : "attribué") : "à trier").join(", ")}`);
     for (const part of parts) {
       const fichier = await enregistrerFichier(db, part.buffer, nom, mime);
       const billet = {
         type: infos.type, titre: infos.titre, date: infos.date, heure: infos.heure, lieu: "",
         details: devinerDetails(part.texte), proprietaire: part.proprietaire, fichiers: [fichier],
-        noteId, source: "mail", expediteur: mail.from?.text || "",
+        noteId, source: "mail", expediteur: exp.adresse || "",
         aVerifier: !infos.date || !part.proprietaire, par: "goupil", creeLe: maintenant,
       };
       await db.collection("billets").add(billet);
