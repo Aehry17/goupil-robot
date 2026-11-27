@@ -22,7 +22,7 @@ export async function pagesTexte(buffer) {
     for (let i = 1; i <= document.numPages; i++) {
       const page = await document.getPage(i);
       const contenu = await page.getTextContent();
-      pages.push(contenu.items.map((it) => it.str).join(" "));
+      pages.push(contenu.items.map((it) => it.str + (it.hasEOL ? "\n" : " ")).join("").replace(/[ \t]+/g, " "));
     }
     try { await chargement.destroy(); } catch {}
     return pages;
@@ -165,6 +165,41 @@ function nomDuLieu(exp) {
 
 const GENERIQUE = /^(de\s+)?(l['’]\s*|la\s+|le\s+|votre\s+|vos\s+|ta\s+|ton\s+)?(achat|commande|r[ée]servation|paiement|billets?|e-?billets?|confirmation|re[çc]u|facture|order|purchase|tickets?)\b/i;
 
+// ───────────── Le nom de l'exposition, du film, du spectacle… ─────────────
+const PETITS_MOTS = new Set(["de", "du", "des", "la", "le", "les", "et", "à", "au", "aux", "en", "sur", "pour", "d", "l"]);
+function joliNom(texte) {
+  if (texte !== texte.toUpperCase()) return texte;
+  return texte.toLowerCase().split(/(\s+|['’-])/).map((m, i) =>
+    (i > 0 && PETITS_MOTS.has(m)) || !/\p{L}/u.test(m) ? m : m.charAt(0).toUpperCase() + m.slice(1)).join("");
+}
+function nettoyerNom(brut) {
+  let t = (brut || "").split(/\s{2,}|\s[|–]\s|\s-\s(?=\d)/)[0];
+  t = t.split(/\b(tarif|plein|r[ée]duit|date|le \d|du \d|horaire|cr[ée]neau|prix|quantit[ée]|place|salle|s[ée]ance|langue|dur[ée]e|vf|vost|vo|valable|n[°o])\b/i)[0];
+  t = t.replace(/[«»"“”]/g, "").replace(/[\s,.;:\-–(]+$/, "").trim();
+  if (t.length < 3 || t.length > 70 || /^\d|@|https?:/.test(t)) return "";
+  if (/^(billets?|e-?billets?|entr[ée]e|ticket|admission|droit d.entr[ée]e|visiteurs?)$/i.test(t)) return "";
+  return joliNom(t);
+}
+export function devinerEvenement(texte) {
+  const t = texte || "";
+  // 1. Exposition « Claude Monet »
+  let m = t.match(/\b(exposition|expo|film|spectacle|concert|pi[eè]ce)\s*:?\s*[«"“]\s*([^»"”\n]{3,80})[»"”]/i);
+  if (m) return (/^expo/i.test(m[1]) ? "Exposition " : "") + nettoyerNom(m[2]);
+  // 2. Exposition : Claude Monet / Film : Dune 3 / Spectacle : …
+  m = t.match(/(?:^|\n)[ \t]*(exposition|expo|titre du film|film|titre|spectacle|pi[eè]ce|concert|[ée]v[ée]nement|artiste|prestation|activit[ée])[ \t]*:[ \t]*([^\n]{3,90})/im);
+  if (m) {
+    const nom = nettoyerNom(m[2]);
+    if (nom) return (/^expo/i.test(m[1]) && !/^expo/i.test(nom) ? "Exposition " : "") + nom;
+  }
+  // 3. Une ligne qui commence par « Exposition … »
+  m = t.match(/(?:^|\n)[ \t]*(exposition[ \t]+[^\n:]{3,70})/im);
+  if (m) {
+    const nom = nettoyerNom(m[1]);
+    if (nom && !/^exposition (temporaire|permanente)s?$/i.test(nom)) return nom;
+  }
+  return "";
+}
+
 export function devinerTitre(sujet, type, exp = {}) {
   const lieu = nomDuLieu(exp);
   if (type === "musee" && lieu) return lieu; // pour un musée, son nom suffit
@@ -267,7 +302,7 @@ async function noteDuJour(db, notes, infos, envoyes, maintenant) {
   const trouvee = memeJour.find((n) => infos.heure && n.heure === infos.heure) || memeJour.find((n) => n.type !== "tache");
   if (trouvee) return trouvee.id;
   const note = {
-    type: "sortie", titre: infos.titre, date: infos.date, heure: infos.heure, rappel: "60",
+    type: "sortie", titre: infos.titreNote || infos.titre, date: infos.date, heure: infos.heure, rappel: "60",
     memo: "", photos: [], fait: false, par: "goupil", creeLe: maintenant,
   };
   const ref = await db.collection("notes").add(note);
@@ -313,8 +348,15 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
   const toutLeTexte = [mail.subject || "", mail.text || "", ...textes].join("\n");
   const type = devinerType(toutLeTexte, exp);
   const quandC = devinerDate(textes.join("\n") + "\n" + (mail.text || "") + "\n" + (mail.subject || ""), new Date(), mail.date);
-  const infos = { type, titre: devinerTitre(mail.subject, type, exp), date: quandC?.date || "", heure: quandC?.heure || "" };
-  console.log(`      Devinés : type ${infos.type}, date ${infos.date || "?"} ${infos.heure || "(heure ?)"}`);
+  const evenement = devinerEvenement(textes.join("\n") + "\n" + (mail.text || ""));
+  const lieu = nomDuLieu(exp);
+  const titreBillet = evenement || devinerTitre(mail.subject, type, exp);
+  const infos = {
+    type, titre: titreBillet, lieu: titreBillet === lieu ? "" : lieu,
+    titreNote: evenement && lieu ? `${evenement} · ${lieu}` : titreBillet,
+    date: quandC?.date || "", heure: quandC?.heure || "",
+  };
+  console.log(`      Devinés : type ${infos.type}, titre « ${infos.titreNote} », date ${infos.date || "?"} ${infos.heure || "(heure ?)"}`);
   const noteId = await noteDuJour(db, notes, infos, envoyes, maintenant);
 
   const ranges = [];
@@ -345,7 +387,7 @@ export async function traiterMail(mail, { db, personnes, notes, envoyes, mainten
     for (const part of parts) {
       const fichier = await enregistrerFichier(db, part.buffer, nom, mime);
       const billet = {
-        type: infos.type, titre: infos.titre, date: infos.date, heure: infos.heure, lieu: "",
+        type: infos.type, titre: infos.titre, date: infos.date, heure: infos.heure, lieu: infos.lieu,
         details: devinerDetails(part.texte), proprietaire: part.proprietaire, fichiers: [fichier],
         noteId, source: "mail", expediteur: exp.adresse || "",
         aVerifier: !infos.date || !part.proprietaire, par: "goupil", creeLe: maintenant,
